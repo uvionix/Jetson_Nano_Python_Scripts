@@ -41,25 +41,34 @@ if num_args == 3:
 	# Get the source mode
 	source_mode = sys.argv[2].upper()
 
+HERELINK_SYS_ID = 42
+AUTOPILOT_ARDUPILOT = 3
+VEHICLE_TYPE_QUAD = 2
 vehicle_detected_in_SOURCE_mode = False
 
 while True:
 	try:
-		# Create a connection with the UART device
-		vehicle = mavutil.mavlink_connection('/dev/ttyTHS1',baud=115200)
+		while True:
+			print("\t Establishing connection with the vehicle...")
 
-		# Create a connection listening to a local UDP port (for debug only)
-		# vehicle = mavutil.mavlink_connection('udpin:localhost:5001',baud=115200)
+			# Create a connection with the UART device
+			vehicle = mavutil.mavlink_connection('/dev/ttyTHS1',baud=115200)
 
-		# Wait for the first heartbeat - this sets the system and component ID of remote system for the link
-		vehicle.wait_heartbeat()
-		print("\t Heartbeat from system (system %u component %u)" % (vehicle.target_system, vehicle.target_component))
+			# Create a connection listening to a local UDP port (for debug only)
+			#vehicle = mavutil.mavlink_connection('udpin:localhost:5001',baud=115200)
 
-		# Get the current mode ID
-		msg = vehicle.recv_match(type='HEARTBEAT',blocking=True)
+			# Wait for the first heartbeat - this sets the system and component ID of remote system for the link
+			vehicle.wait_heartbeat()
+			msg = vehicle.recv_match(type='HEARTBEAT',blocking=True)
+			
+			if vehicle.target_system > 0 and vehicle.target_system != HERELINK_SYS_ID and msg.type == VEHICLE_TYPE_QUAD and msg.autopilot == AUTOPILOT_ARDUPILOT:
+				break
+			else:
+				continue
+
 		mode = mavutil.mode_string_v10(msg)
 		mode_id = vehicle.mode_mapping()[mode]
-		print("\t Heartbeat message received. Current vehicle mode is %s" % (mode))
+		print("\t Connection established (vehicle id: %u, component %u). Current vehicle mode is %s" % (vehicle.target_system, vehicle.target_component, mode))
 
 		if num_args == 2:
 			# Set the source mode equal to the current mode
@@ -73,11 +82,20 @@ while True:
 			while new_mode_id != mode_id:
 				# Set the target mode
 				print("\t Switching vehicle to mode %s. Sending mode change command..." % (target_mode))
-				vehicle.mav.set_mode_send(vehicle.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,new_mode_id)
+				# DEPRECATED COMMAND: vehicle.mav.set_mode_send(vehicle_target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,new_mode_id)
+				vehicle.mav.command_long_send(vehicle.target_system, 1, mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, new_mode_id, 0, 0, 0, 0, 0)
 				print("\t Mode change command sent! Waiting for heartbeet...")
 				time.sleep(2)
+				
 				# Update the vehicle mode
-				msg = vehicle.recv_match(type='HEARTBEAT',blocking=True)
+				while True:
+					msg = vehicle.recv_match(type='HEARTBEAT',blocking=True)
+
+					if msg.type != VEHICLE_TYPE_QUAD or msg.autopilot != AUTOPILOT_ARDUPILOT:
+						continue
+
+					break
+
 				mode = mavutil.mode_string_v10(msg)
 				mode_id = vehicle.mode_mapping()[mode]
 				print("\t Heartbeat message received. Current vehicle mode is %s" % (mode))
@@ -90,3 +108,6 @@ while True:
 	except serial.serialutil.SerialException:
 		print("\t Connection failed. Retrying...")
 		time.sleep(2)
+	except KeyError:
+		print("\t Unknown mode %s specified. Mode change failed!" % (target_mode))
+		sys.exit(1)
