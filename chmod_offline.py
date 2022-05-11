@@ -54,7 +54,6 @@ establish_conn_retry_attemts = 0
 establish_conn_count = 0
 vehicle_sys_id = 0
 vehicle_component_id = 0
-herelink_remote_detected = 0
 mode_id_obtained = 0
 
 # Device initialization
@@ -89,7 +88,7 @@ while True:
 			establish_conn_count = establish_conn_count + 1
 
 			if establish_conn_count > 3 * max_establish_conn_count:
-				print("\t Establishing connection failed! Mode change has been canceled!")
+				print("\t Establishing connection failed (no valid HEARTBEET detected)! Mode change has been canceled!")
 				sys.exit(1)
 		
 		# Initialize the vehicle system and component IDs and check if HERELINK is connected
@@ -98,15 +97,11 @@ while True:
 			vehicle.wait_heartbeat() # This sets the system and component ID
 
 			if vehicle.target_system == HERELINK_SYS_ID:
-				if herelink_remote_detected == 0:
-					herelink_remote_detected = 1
-					print("\t HERELINK remote detected")
+				print("\t HERELINK remote detected! Mode change has been canceled!")
+				sys.exit(0)
 			elif vehicle.target_system > 0 and vehicle.target_system < 256:
 				vehicle_sys_id = vehicle.target_system
 				vehicle_component_id = vehicle.target_component
-
-			if vehicle_sys_id > 0 and herelink_remote_detected == 1:
-				break
 
 			establish_conn_count = establish_conn_count + 1
 		
@@ -129,19 +124,15 @@ while True:
 		if vehicle_sys_id > 0:
 			print("\t Connection established (vehicle id: %u, component %u). Current vehicle mode is %s" % (vehicle_sys_id, vehicle_component_id, mode))
 		else:
-			if herelink_remote_detected == 1:
-				print("\t Establishing connection failed! Since HERELINK remote is connected mode change has been canceled!")
+			establish_conn_retry_attemts = establish_conn_retry_attemts + 1
+
+			if establish_conn_retry_attemts > max_establish_conn_retry_attemts:
+				print("\t Establishing connection failed! Mode change has been canceled!")
 				sys.exit(1)
-			else:
-				establish_conn_retry_attemts = establish_conn_retry_attemts + 1
 
-				if establish_conn_retry_attemts > max_establish_conn_retry_attemts:
-					print("\t Establishing connection failed! Mode change has been canceled!")
-					sys.exit(1)
-
-				print("\t Establishing connection failed! Retrying...")
-				establish_conn_count = 0
-				continue
+			print("\t Establishing connection failed! Retrying...")
+			establish_conn_count = 0
+			continue
 
 		if mode_id == source_mode_id or vehicle_detected_in_SOURCE_mode == True:
 			
