@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # The script is used to change the mode of the vehicle by establishing a connection with the UART device. This connection is possible
 # when the UART device is not being accessed by another process i.e. MAVProxy. The MAVProxy process is disabled when the vehicle looses
