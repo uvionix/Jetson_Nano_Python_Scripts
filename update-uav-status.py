@@ -2,7 +2,7 @@
 
 import sys
 import time
-import serial
+#import serial
 from pymavlink import mavutil
 
 # MAVLINK variables initialization
@@ -10,6 +10,10 @@ AUTOPILOT_ARDUPILOT = 3
 VEHICLE_TYPE_QUAD = 2
 
 # Device initialization
+prev_armed="DISARMED"
+f = open("/etc/default/xoss-armed-status", "w")
+f.write(prev_armed+"\n")
+f.close()
 local_port = sys.argv[1]
 device_baudrate = int(sys.argv[2])
 device = 'udpin:localhost:'+local_port # Create a connection listening to a local UDP port
@@ -46,6 +50,12 @@ while True:
 	f.write(armed+"\nMode: "+mode+"\nBattery voltage: "+str(round(batt_volt_V*100)/100.0)+" V"+"\nBattery %: "+str(batt_percentage))
 	f.close()
 
+	if prev_armed != armed:
+		f = open("/etc/default/xoss-armed-status", "w")
+		f.write(armed+"\n")
+		f.close()
+
+	prev_armed=armed
 	time.sleep(1)
 
 
