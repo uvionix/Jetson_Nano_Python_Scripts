@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 
-# The script is used to change the mode of the vehicle by establishing a connection with the UART device. This connection is possible
-# when the UART device is not being accessed by another process i.e. MAVProxy. The MAVProxy process is disabled when the vehicle looses
-# network connectivity. In that case this script can be triggered to switch the vehicle in a known mode (for example LOITER). 
-# To run the script use one of the following commands
+# The script is used to change the mode of the vehicle by establishing a connection with the UART device through a local UDP port. This connection is possible
+# when the MAVProxy service is running. In that case this script can be triggered to switch the vehicle to a known mode (for example LOITER), when the 
+# network connectivity is lost. To run the script use one of the following commands
 #	
-#	python <script_name> <target_mode>
-#	python <script_name> <target_mode> <source_mode>
-#	python3 <script_name> <target_mode>
-#	python3 <script_name> <target_mode> <source_mode>
+#	python <script_name> <port> <baudrate> <target_mode>
+#	python <script_name> <port> <baudrate> <target_mode> <source_mode>
+#	python3 <script_name> <port> <baudrate> <target_mode>
+#	python3 <script_name> <port> <baudrate> <target_mode> <source_mode>
 # 
 # where 
 #
-#	<script_name> is the name of this script (exaple: <script_name> = chmod_offline.py)
+#	<port> is the port on which the connection has to be established (example: <port> = 5001)
+#	<baudrate> is the connection baudrate (example: baudrate = 115200)
+#	<script_name> is the name of this script (example: <script_name> = chmod_offline.py)
 #	<target_mode> is the mode to which the vehicle should switch to (example: <target_mode> = loiter)
 #	<source_mode> when provided is the mode in which the vehicle should be in order to switch to the provided target mode (example: <source_mode> = auto)
 #	NOTE: If the vehicle is not in the source mode the mode change will be cancelled
@@ -27,19 +28,23 @@ from pymavlink import mavutil
 # Check the number of command line arguments
 num_args = len(sys.argv)
 
-if num_args < 2:
+if num_args < 4:
 	print("\t Not enough arguments!")
 	sys.exit(1)
-elif num_args > 3:
-	print("\t Too much arguments!")
+elif num_args > 5:
+	print("\t Too many arguments!")
 	sys.exit(1)
 
-# Get the target mode
-target_mode = sys.argv[1].upper()
+# Get the comunication parameters
+local_port = sys.argv[1]
+device_baudrate = int(sys.argv[2])
 
-if num_args == 3:
+# Get the target mode
+target_mode = sys.argv[3].upper()
+
+if num_args == 5:
 	# Get the source mode
-	source_mode = sys.argv[2].upper()
+	source_mode = sys.argv[4].upper()
 
 # MAVLINK variables initialization
 HERELINK_SYS_ID = 42
@@ -57,14 +62,14 @@ vehicle_component_id = 0
 mode_id_obtained = 0
 
 # Device initialization
-device = '/dev/ttyTHS1' # Create a connection with the UART device
-#device = 'udpin:localhost:5001' # Create a connection listening to a local UDP port (for debug only)
+#device = '/dev/ttyTHS1' # Create a connection with the UART device (MAVProxy service has to be stopped)
+device = 'udpin:localhost:'+local_port # Create a connection listening to a local UDP port (MAVProxy service has to be running)
 
 while True:
 	try:
 		if establish_conn_retry_attemts == 0:
 			print("\t Establishing connection with the vehicle...")
-			vehicle = mavutil.mavlink_connection(device,baud=115200)
+			vehicle = mavutil.mavlink_connection(device,baud=device_baudrate)
 
 		# Initialize the mode IDs
 		while mode_id_obtained == 0:
@@ -75,7 +80,7 @@ while True:
 				mode = mavutil.mode_string_v10(msg)
 				mode_id = vehicle.mode_mapping()[mode]
 
-				if num_args == 2:
+				if num_args == 4:
 					# Set the source mode equal to the current mode
 					source_mode = mode
 
@@ -93,7 +98,7 @@ while True:
 		
 		# Initialize the vehicle system and component IDs and check if HERELINK is connected
 		while establish_conn_count < max_establish_conn_count:
-			vehicle = mavutil.mavlink_connection(device,baud=115200) # Has to be generated each iteration otherwise a system ID can be missed
+			vehicle = mavutil.mavlink_connection(device,baud=device_baudrate) # Has to be generated each iteration otherwise a system ID can be missed
 			vehicle.wait_heartbeat() # This sets the system and component ID
 
 			if vehicle.target_system == HERELINK_SYS_ID:
@@ -108,7 +113,7 @@ while True:
 		# Ensuring that the vehicle object can generate valid heartbeet messages
 		establish_conn_count = 0
 		while True:
-			vehicle = mavutil.mavlink_connection(device,baud=115200)
+			vehicle = mavutil.mavlink_connection(device,baud=device_baudrate)
 			vehicle.wait_heartbeat()
 			msg = vehicle.recv_match(type='HEARTBEAT',blocking=True)
 
