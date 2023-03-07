@@ -7,15 +7,15 @@ from pymavlink import mavutil
 
 AUTOPILOT_ARDUPILOT = 3
 VEHICLE_TYPE_QUAD = 2
-GST_SETUP_FILE = "/etc/default/gstreamer-setup"
-WEBPAGE_STATUS_FILE = "/var/www/html/uav-latest-status"
+GST_SERVICE_FILE = "/etc/systemd/system/gstreamer-autostart.service"
 
 class UavStatus:
 	# Constructor
-	def __init__(self, local_port, baudrate):
+	def __init__(self, local_port, baudrate, status_file):
 		self.__dt = 1.0
 		self.__local_port = local_port
 		self.__baudrate = baudrate
+		self.__status_file = status_file
 		self.__armed = 'DISARMED'
 		self.__mode = 'UNKNOWN'
 		self.__batt_volt_V = 0.0
@@ -23,6 +23,7 @@ class UavStatus:
 		self.__rec_channel_pwm = 0
 		self.__start_recording = False
 		self.__camera_cmds_file_initialized = False
+		self.__gst_setup_file_initialized = False
 		self.__camera_start_rec_hotkey_initialized = False
 		self.__camera_stop_rec_hotkey_initialized = False
 		self.__cam_rec_trigger_ch = -1
@@ -33,31 +34,47 @@ class UavStatus:
 		self.__prev_batt_volt_V = self.__batt_volt_V
 		self.__prev_batt_percentage = self.__batt_percentage
 
-		# Get the camera commands file and initialize the related paramters
+		# Get the setup file for the gstreamer service
 		try:
-			with open(GST_SETUP_FILE, 'r') as f:
+			with open(GST_SERVICE_FILE, 'r') as f:
 				for line in f.readlines():
 					try:
-						param = line.split(sep='"')[0]
-						if param.upper() == 'CMD_FILE=':
-							self.__camera_cmds_file = line.split(sep='"')[1]
-							self.__camera_cmds_file_initialized = True
-							print("Camera commands file initialized to %s" % self.__camera_cmds_file)
-						elif param.upper() == 'CAMERA_REC_TRIGGER_CHANNEL=':
-							self.__cam_rec_trigger_ch = int(line.split(sep='"')[1])
-							print("Camera record trigger channel initialized to %d" % self.__cam_rec_trigger_ch)
-						elif param.upper() == 'CAMERA_START_REC_HOTKEY=':
-							self.__camera_start_rec_hotkey = line.split(sep='"')[1]
-							self.__camera_start_rec_hotkey_initialized = True
-							print("Camera start recording hotkey set to %s" % self.__camera_start_rec_hotkey)
-						elif param.upper() == 'CAMERA_STOP_REC_HOTKEY=':
-							self.__camera_stop_rec_hotkey = line.split(sep='"')[1]
-							self.__camera_stop_rec_hotkey_initialized = True
-							print("Camera stop recording hotkey set to %s" % self.__camera_stop_rec_hotkey)
+						if line.split(sep='=')[0].lower() == 'environmentfile':
+							self.__gst_setup_file = line.split(sep='=')[1]
+							print("Gstreamer setup file initialized to %s" % self.__gst_setup_file)
+							self.__gst_setup_file_initialized = True
+							break
 					except IndexError:
 						continue
 		except IOError:
-			print("Error opening file %s" % GST_SETUP_FILE)
+			print("Error opening file %s" % GST_SERVICE_FILE)
+
+		# Get the camera commands file and initialize the related paramters
+		if self.__gst_setup_file_initialized:
+			try:
+				with open(self.__gst_setup_file, 'r') as f:
+					for line in f.readlines():
+						try:
+							param = line.split(sep='"')[0]
+							if param.upper() == 'CMD_FILE=':
+								self.__camera_cmds_file = line.split(sep='"')[1]
+								self.__camera_cmds_file_initialized = True
+								print("Camera commands file initialized to %s" % self.__camera_cmds_file)
+							elif param.upper() == 'CAMERA_REC_TRIGGER_CHANNEL=':
+								self.__cam_rec_trigger_ch = int(line.split(sep='"')[1])
+								print("Camera record trigger channel initialized to %d" % self.__cam_rec_trigger_ch)
+							elif param.upper() == 'CAMERA_START_REC_HOTKEY=':
+								self.__camera_start_rec_hotkey = line.split(sep='"')[1]
+								self.__camera_start_rec_hotkey_initialized = True
+								print("Camera start recording hotkey set to %s" % self.__camera_start_rec_hotkey)
+							elif param.upper() == 'CAMERA_STOP_REC_HOTKEY=':
+								self.__camera_stop_rec_hotkey = line.split(sep='"')[1]
+								self.__camera_stop_rec_hotkey_initialized = True
+								print("Camera stop recording hotkey set to %s" % self.__camera_stop_rec_hotkey)
+						except IndexError:
+							continue
+			except IOError:
+				print("Error opening file %s" % self.__gst_setup_file)
 
 		if self.__camera_cmds_file_initialized and self.__cam_rec_trigger_ch >= 0 and \
 			self.__camera_start_rec_hotkey_initialized and self.__camera_stop_rec_hotkey_initialized:
@@ -174,18 +191,18 @@ class UavStatus:
 					print("%s; Mode: %s; Battery voltage: %.1f V; Battery percentage: %d" % (self.__armed, self.__mode, self.__batt_volt_V, self.__batt_percentage))
 
 					try:
-						f = open(WEBPAGE_STATUS_FILE, "w")
+						f = open(self.__status_file, "w")
 						f.write(self.__armed+"\nMode: "+self.__mode+"\nBattery voltage: "+str(self.__batt_volt_V)+" V"+"\nBattery %: "+str(self.__batt_percentage))
 						f.close()
 					except IOError:
-						print("Error opening file %s" % WEBPAGE_STATUS_FILE)
+						print("Error opening file %s" % self.__status_file)
 
 				self.__threadLock.release()
 
 			sleep(self.__dt)
 
 # Create the vehicle status object and start execution
-status = UavStatus(local_port=int(sys.argv[1]), baudrate=int(sys.argv[2]))
+status = UavStatus(local_port=int(sys.argv[1]), baudrate=int(sys.argv[2]), status_file=sys.argv[3])
 status.start_threads()
 
 # Start main thread
