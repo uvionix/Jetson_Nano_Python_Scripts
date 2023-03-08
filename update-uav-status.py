@@ -40,7 +40,7 @@ class UavStatus:
 				for line in f.readlines():
 					try:
 						if line.split(sep='=')[0].lower() == 'environmentfile':
-							self.__gst_setup_file = line.split(sep='=')[1]
+							self.__gst_setup_file = line.split(sep='=')[1].strip(' \n')
 							print("Gstreamer setup file initialized to %s" % self.__gst_setup_file)
 							self.__gst_setup_file_initialized = True
 							break
