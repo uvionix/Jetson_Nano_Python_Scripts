@@ -1,178 +1,149 @@
 #!/usr/bin/env python3
 
-# The script is used to change the mode of the vehicle by establishing a connection with the UART device through a local UDP port. This connection is possible
-# when the MAVProxy service is running. In that case this script can be triggered to switch the vehicle to a known mode (for example LOITER), when the 
-# network connectivity is lost. To run the script use one of the following commands
-#	
-#	python <script_name> <port> <baudrate> <target_mode>
-#	python <script_name> <port> <baudrate> <target_mode> <source_mode>
-#	python3 <script_name> <port> <baudrate> <target_mode>
-#	python3 <script_name> <port> <baudrate> <target_mode> <source_mode>
-# 
+# The script is used to change the mode of the vehicle by establishing a connection with a communication socket,
+# opened by a dedicated service which monitors the vehicle status. To run the script use one of the following commands:
+#
+#	python3 <script_name> <port> <target_mode>
+#	python3 <script_name> <port> <target_mode> <source_mode>
+#
 # where 
 #
-#	<port> is the port on which the connection has to be established (example: <port> = 5001)
-#	<baudrate> is the connection baudrate (example: baudrate = 115200)
+#   <port> is the port on which the connection has to be established (example: <port> = 5001)
 #	<script_name> is the name of this script (example: <script_name> = chmod_offline.py)
 #	<target_mode> is the mode to which the vehicle should switch to (example: <target_mode> = loiter)
-#	<source_mode> when provided is the mode in which the vehicle should be in order to switch to the provided target mode (example: <source_mode> = auto)
+#	<source_mode> when provided is the mode in which the vehicle should be in, in order to switch to the provided target mode (example: <source_mode> = auto)
 #	NOTE: If the vehicle is not in the source mode the mode change will be cancelled
 #
 # NOTE: The mode names have to be according to the ArduPilot names convention.
 
 import sys
-import time
-import serial
-from pymavlink import mavutil
+import socket
+from time import sleep
+from uvx_ipc_api import api_commands
+from uvx_ipc_api import api_responses
+
+SYSTEM_SERVICES_PATH = '/etc/systemd/system/'
+MAVPROXY_SERVICE_FILE = 'mavproxy-autostart.service'
+
+# Send a command and wait for a response. The response is returned
+def send_command(com_socket, cmd, buff_size):
+	while True:
+		try:
+			com_socket.sendall(bytes(cmd,"utf-8"))
+		except socket.error:
+			print(f"\t Error sending command {cmd}. Retrying...")
+			sleep(2.0)
+			continue
+		
+		# Get the command response
+		cmd_res = str(com_socket.recv(buff_size),"utf-8")
+		if cmd_res == api_responses["CMD_FAILED"]:
+			print("\t Command failed. Retrying...")
+			sleep(2.0)
+		else:
+			return cmd_res
+
+# Get vehicle mode
+def get_mode(com_socket):
+	mode = send_command(com_socket=com_socket, cmd=api_commands["CMD_GET_FLIGHT_MODE"], buff_size=recv_buff_size)
+	return mode.upper()
+
+print("\t Starting mode change script...")
+
+# Get the mavproxy setup file and initialize the receive buffer size, which specifies the maximum number of bytes to receive
+recv_buff_size = 512
+try:
+	with open(SYSTEM_SERVICES_PATH+MAVPROXY_SERVICE_FILE, 'r') as f:
+		for line in f.readlines():
+			try:
+				if line.split(sep='=')[0].lower() == 'environmentfile':
+					mavproxy_setup_file = line.split(sep='=')[1].strip(' \n')
+					try:
+						with open(mavproxy_setup_file, 'r') as stp:
+							for line in stp.readlines():
+								try:
+									param = line.split(sep='"')[0]
+									if param.upper() == 'COM_SERVER_SOCKET_RECV_BUFF_SIZE=':
+										try:
+											recv_buff_size = int(line.split(sep='"')[1])
+										except ValueError:
+											print(f"\t Error parsing receive buffer size parameter from file {mavproxy_setup_file}")
+											break
+										break
+								except IndexError:
+									continue
+					except IOError:
+						print(f"\t Error opening file {mavproxy_setup_file}")
+					
+					break
+			except IndexError:
+				continue
+except IOError:
+	print(f"\t Error opening file {SYSTEM_SERVICES_PATH+MAVPROXY_SERVICE_FILE}")
 
 # Check the number of command line arguments
 num_args = len(sys.argv)
 
-if num_args < 4:
-	print("\t Not enough arguments!")
+if num_args < 3:
+	print("\t Not enough input arguments!")
 	sys.exit(1)
-elif num_args > 5:
-	print("\t Too many arguments!")
+elif num_args > 4:
+	print("\t Too many input arguments!")
 	sys.exit(1)
 
-# Get the comunication parameters
-local_port = sys.argv[1]
-device_baudrate = int(sys.argv[2])
+# Get the parameters
+try:
+    local_port = int(sys.argv[1])
+except ValueError:
+	print(f"\t Invalid port {sys.argv[1]} specified!")
+	sys.exit(1)
 
-# Get the target mode
-target_mode = sys.argv[3].upper()
+target_mode = sys.argv[2].upper()
 
-if num_args == 5:
-	# Get the source mode
-	source_mode = sys.argv[4].upper()
-
-# MAVLINK variables initialization
-HERELINK_SYS_ID = 42
-AUTOPILOT_ARDUPILOT = 3
-VEHICLE_TYPE_QUAD = 2
-
-# Variables initialization
-vehicle_detected_in_SOURCE_mode = False
-max_establish_conn_count = 10
-max_establish_conn_retry_attemts = 3
-establish_conn_retry_attemts = 0
-establish_conn_count = 0
-vehicle_sys_id = 0
-vehicle_component_id = 0
-mode_id_obtained = 0
-
-# Device initialization
-#device = '/dev/ttyTHS1' # Create a connection with the UART device (MAVProxy service has to be stopped)
-device = 'udpin:localhost:'+local_port # Create a connection listening to a local UDP port (MAVProxy service has to be running)
+# Connect to the communication socket
+cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
 while True:
+	print(f"\t Establishing socket connection on port {local_port} ...", end=' ')
 	try:
-		if establish_conn_retry_attemts == 0:
-			print("\t Establishing connection with the vehicle...")
-			vehicle = mavutil.mavlink_connection(device,baud=device_baudrate)
-
-		# Initialize the mode IDs
-		while mode_id_obtained == 0:
-			vehicle.wait_heartbeat()
-			msg = vehicle.recv_match(type='HEARTBEAT',blocking=True)
-
-			if msg.type == VEHICLE_TYPE_QUAD and msg.autopilot == AUTOPILOT_ARDUPILOT:
-				mode = mavutil.mode_string_v10(msg)
-				mode_id = vehicle.mode_mapping()[mode]
-
-				if num_args == 4:
-					# Set the source mode equal to the current mode
-					source_mode = mode
-
-				source_mode_id = vehicle.mode_mapping()[source_mode]
-				target_mode_id = vehicle.mode_mapping()[target_mode]
-				mode_id_obtained = 1
-				establish_conn_count = 0
-				break
-			
-			establish_conn_count = establish_conn_count + 1
-
-			if establish_conn_count > 3 * max_establish_conn_count:
-				print("\t Establishing connection failed (no valid HEARTBEET detected)! Mode change has been canceled!")
-				sys.exit(1)
-		
-		# Initialize the vehicle system and component IDs and check if HERELINK is connected
-		while establish_conn_count < max_establish_conn_count:
-			vehicle = mavutil.mavlink_connection(device,baud=device_baudrate) # Has to be generated each iteration otherwise a system ID can be missed
-			vehicle.wait_heartbeat() # This sets the system and component ID
-
-			if vehicle.target_system == HERELINK_SYS_ID:
-				print("\t HERELINK remote detected! Mode change has been canceled!")
-				sys.exit(0)
-			elif vehicle.target_system > 0 and vehicle.target_system < 256:
-				vehicle_sys_id = vehicle.target_system
-				vehicle_component_id = vehicle.target_component
-
-			establish_conn_count = establish_conn_count + 1
-		
-		# Ensuring that the vehicle object can generate valid heartbeet messages
-		establish_conn_count = 0
-		while True:
-			vehicle = mavutil.mavlink_connection(device,baud=device_baudrate)
-			vehicle.wait_heartbeat()
-			msg = vehicle.recv_match(type='HEARTBEAT',blocking=True)
-
-			if msg.type == VEHICLE_TYPE_QUAD and msg.autopilot == AUTOPILOT_ARDUPILOT:
-				break
-
-			establish_conn_count = establish_conn_count + 1
-
-			if establish_conn_count > 3 * max_establish_conn_count:
-				print("\t Establishing connection failed! Mode change has been canceled!")
-				sys.exit(1)
-
-		if vehicle_sys_id > 0:
-			print("\t Connection established (vehicle id: %u, component %u). Current vehicle mode is %s" % (vehicle_sys_id, vehicle_component_id, mode))
-		else:
-			establish_conn_retry_attemts = establish_conn_retry_attemts + 1
-
-			if establish_conn_retry_attemts > max_establish_conn_retry_attemts:
-				print("\t Establishing connection failed! Mode change has been canceled!")
-				sys.exit(1)
-
-			print("\t Establishing connection failed! Retrying...")
-			establish_conn_count = 0
-			continue
-
-		if mode_id == source_mode_id or vehicle_detected_in_SOURCE_mode == True:
-			
-			vehicle_detected_in_SOURCE_mode = True
-			
-			while target_mode_id != mode_id:
-				# Set the target mode
-				print("\t Switching vehicle to mode %s. Sending mode change command..." % (target_mode))
-
-				# DEPRECATED COMMAND: vehicle.mav.set_mode_send(vehicle_target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,new_mode_id)
-				vehicle.mav.command_long_send(vehicle_sys_id, 1, mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, target_mode_id, 0, 0, 0, 0, 0)
-				print("\t Mode change command sent! Waiting for heartbeet...")
-				time.sleep(2)
-				
-				# Update the vehicle mode
-				while True:
-					msg = vehicle.recv_match(type='HEARTBEAT',blocking=True)
-
-					if msg.type != VEHICLE_TYPE_QUAD or msg.autopilot != AUTOPILOT_ARDUPILOT:
-						continue
-
-					break
-
-				mode = mavutil.mode_string_v10(msg)
-				mode_id = vehicle.mode_mapping()[mode]
-				print("\t Heartbeat message received. Current vehicle mode is %s" % (mode))
-
-			print("\t Vehicle mode successfully set to %s!" % (mode))
-		else:
-			print("\t Vehicle mode change canceled because vehicle was not in %s mode. Current vehicle mode is %s!" % (source_mode, mode))
-
+		cli.connect(('localhost', local_port))
+		print("Connection established!")
 		break
-	except serial.serialutil.SerialException:
-		print("\t Connection failed. Retrying...")
-		time.sleep(2)
-	except KeyError:
-		print("\t Unknown mode %s specified. Mode change failed!" % (target_mode))
-		sys.exit(1)
+	except ConnectionRefusedError:
+		print("Connection refused. Retrying...")
+		sleep(2.0)
+
+# Get the current flight mode
+mode = get_mode(com_socket=cli)
+print(f"\t Current vehicle mode is {mode}")
+
+# Get the source mode
+if num_args == 4:
+	source_mode = sys.argv[3].upper()
+else:
+	source_mode = mode
+
+if mode == source_mode:
+	while mode != target_mode:
+		print(f"\t Switching vehicle to mode {target_mode}. Sending mode change command...")
+		cmd_res = send_command(com_socket=cli, cmd=(api_commands["CMD_SET_FLIGHT_MODE"] + " " + target_mode), buff_size=recv_buff_size)
+		
+		if cmd_res == api_responses["CMD_SUCCESSFULL"]:
+			sleep(3.0)
+			mode = get_mode(com_socket=cli)
+		elif cmd_res == api_responses["CMD_UNRECOGNIZED_MODE"]:
+			print(f"\t Unknown mode {target_mode} specified. Mode change failed!")
+			break
+		elif cmd_res == api_responses["CMD_UNRECOGNIZED"]:
+			print("\t Unknown mode change command specified. Mode change failed!")
+			break
+		else:
+			print("\t Unexpected error occurred. Mode change failed!")
+			break
+	else:
+		print(f"\t Vehicle mode successfully set to {mode}!")
+else:
+	print(f"\t Vehicle mode change canceled - vehicle was not in {source_mode} mode. Current vehicle mode is {mode}")
+
+
+cli.close()

@@ -7,19 +7,12 @@ import socket
 import os
 from time import sleep
 from pymavlink import mavutil
+from uvx_ipc_api import api_commands
+from uvx_ipc_api import api_responses
 
 SYSTEM_SERVICES_PATH = '/etc/systemd/system/'
 CAMERA_SERVICE_FILE = 'camera-start@.service'
 SHUTDOWN_SERVICE_FILE = 'system-shutdown.service'
-
-api_commands = {"CMD_SET_FLIGHT_MODE"				: "setmode",
-				"CMD_GET_FLIGHT_MODE"				: "getmode",
-				"CMD_GET_SYSTEM_TIME"				: "gettime"}
-
-api_responces = {"CMD_SUCCESSFULL"					: "ok",
-		 		 "CMD_UNRECOGNIZED"					: "unrecognized command",
-				 "CMD_FAILED"						: "error",
-				 "CMD_UNRECOGNIZED_MODE"			: "unrecognized mode"}
 
 log_messages = {"MSG_START_NEW_LOG"					: "============= INITIALIZING NEW LOG FILE =============",
 				"MSG_INIT_ENV_VARS"					: "Initializing environment variables...",
@@ -66,6 +59,7 @@ log_messages = {"MSG_START_NEW_LOG"					: "============= INITIALIZING NEW LOG FI
 				"MSG_CAM_SOCKET_CONN_TERMINATED"	: "Connection with camera terminated!",
 				"MSG_COM_SOCKET_ACCEPTED_CONN"		: "Communication server accepted connection:",
 				"MSG_COM_SOCKET_CLOSED_CONN"		: "Communication server closed connection:",
+				"MSG_RECEIVED_MODE_CHANGE_CMD"		: "Received mode change command. Target mode is",
 				"MSG_ABORT"							: "Aborting..."}
 
 class UavStatus:
@@ -470,54 +464,57 @@ class UavStatus:
 
 	# Communication socket server
 	def __com_socket_server__(self):
+		srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		srv.bind(('localhost', self.__com_server_socket_port))
+		
 		while True:
-			with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
-				srv.bind(('localhost', self.__com_server_socket_port))
-				srv.listen()
-				conn, addr = srv.accept()
-				with conn:
-					with open(self.__log_file, 'a') as log:
-						print(f"{self.__timestamp} {log_messages['MSG_COM_SOCKET_ACCEPTED_CONN']} {addr}", file=log)
-					while True:
-						data = conn.recv(self.__com_server_socket_recv_buff_size)
-						if not data:
+			srv.listen()
+			conn, addr = srv.accept()
+			with conn:
+				with open(self.__log_file, 'a') as log:
+					print(f"{self.__timestamp} {log_messages['MSG_COM_SOCKET_ACCEPTED_CONN']} {addr}", file=log)
+				
+				while True:
+					data = conn.recv(self.__com_server_socket_recv_buff_size)
+					if not data:
+						with open(self.__log_file, 'a') as log:
+							print(f"{self.__timestamp} {log_messages['MSG_COM_SOCKET_CLOSED_CONN']} {addr}", file=log)
+						break
+					
+					# Parse the input data
+					data_str = str(data, "utf-8").strip()
+					
+					# Get the command
+					cmd = data_str.split(sep=' ')[0].lower()
+					
+					# Get the argument
+					try:
+						arg = data_str.split(sep=' ')[1]
+					except IndexError:
+						arg=''
+					
+					reply = api_responses["CMD_FAILED"]
+					if self.__threadLock.acquire():
+						if self.__mode != 'UNKNOWN':
 							with open(self.__log_file, 'a') as log:
-								print(f"{self.__timestamp} {log_messages['MSG_COM_SOCKET_CLOSED_CONN']} {addr}", file=log)
-							break
+								if cmd == api_commands["CMD_SET_FLIGHT_MODE"]:
+									new_mode = arg.upper()
+									if new_mode in self.__vehicle_mode_map:
+										print(f"{self.__timestamp} {log_messages['MSG_RECEIVED_MODE_CHANGE_CMD']} {new_mode}", file=log)
+										self.__target_mode = new_mode
+										reply = api_responses["CMD_SUCCESSFULL"]
+									else:
+										reply = api_responses["CMD_UNRECOGNIZED_MODE"]
+								elif cmd == api_commands["CMD_GET_FLIGHT_MODE"]:
+									reply = self.__mode
+								elif cmd == api_commands["CMD_GET_SYSTEM_TIME"]:
+									reply = '0'
+								else:
+									reply = api_responses["CMD_UNRECOGNIZED"]
 						
-						# Parse the input data
-						data_str = str(data, "utf-8").strip()
-
-						# Get the command
-						cmd = data_str.split(sep=' ')[0].lower()
-
-						# Get the argument
-						try:
-							arg = data_str.split(sep=' ')[1]
-						except IndexError:
-							arg=''
-						
-						reply = api_responces["CMD_FAILED"]
-						if cmd == api_commands["CMD_SET_FLIGHT_MODE"]:
-							new_mode = arg.upper()
-							if new_mode in self.__vehicle_mode_map:
-								if self.__threadLock.acquire():
-									self.__target_mode = new_mode
-									self.__threadLock.release()
-								
-									while new_mode != self.__mode:
-										pass
-									reply = api_responces["CMD_SUCCESSFULL"]
-							else:
-								reply = api_responces["CMD_UNRECOGNIZED_MODE"]
-						elif cmd == api_commands["CMD_GET_FLIGHT_MODE"]:
-							reply = self.__mode
-						elif cmd == api_commands["CMD_GET_SYSTEM_TIME"]:
-							reply = '0'
-						else:
-							reply = api_responces["CMD_UNRECOGNIZED"]
-
-						conn.sendall(bytes(reply,"utf-8"))
+						self.__threadLock.release()
+					
+					conn.sendall(bytes(reply,"utf-8"))
 
 # Create the vehicle status object and start execution
 status = UavStatus(local_port=int(sys.argv[1]), baudrate=int(sys.argv[2]), status_file=sys.argv[3])
