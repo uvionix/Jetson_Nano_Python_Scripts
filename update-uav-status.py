@@ -6,6 +6,8 @@ import subprocess
 import socket
 import os
 from time import sleep
+from datetime import datetime
+from enum import Enum
 from pymavlink import mavutil
 from uvx_ipc_api import api_commands
 from uvx_ipc_api import api_responses
@@ -13,6 +15,16 @@ from uvx_ipc_api import api_responses
 SYSTEM_SERVICES_PATH = '/etc/systemd/system/'
 CAMERA_SERVICE_FILE = 'camera-start@.service'
 SHUTDOWN_SERVICE_FILE = 'system-shutdown.service'
+
+gps_fix_type = Enum('GPS_FIX_TYPE', ['GPS_FIX_TYPE_NO_GPS',
+									 'GPS_FIX_TYPE_NO_FIX',
+									 'GPS_FIX_TYPE_2D_FIX',
+									 'GPS_FIX_TYPE_3D_FIX',
+									 'GPS_FIX_TYPE_DGPS',
+									 'GPS_FIX_TYPE_RTK_FLOAT',
+									 'GPS_FIX_TYPE_RTK_FIXED',
+									 'GPS_FIX_TYPE_STATIC',
+									 'GPS_FIX_TYPE_PPP'], start = 0)
 
 log_messages = {"MSG_START_NEW_LOG"					: "============= INITIALIZING NEW LOG FILE =============",
 				"MSG_INIT_ENV_VARS"					: "Initializing environment variables...",
@@ -60,6 +72,8 @@ log_messages = {"MSG_START_NEW_LOG"					: "============= INITIALIZING NEW LOG FI
 				"MSG_COM_SOCKET_ACCEPTED_CONN"		: "Communication server accepted connection:",
 				"MSG_COM_SOCKET_CLOSED_CONN"		: "Communication server closed connection:",
 				"MSG_RECEIVED_MODE_CHANGE_CMD"		: "Received mode change command. Target mode is",
+				"MSG_GPS_3D_FIX_OBTAINED"			: "GPS 3D fix has been obtained",
+				"MSG_GPS_3D_FIX_LOST"				: "GPS 3D fix has been lost",
 				"MSG_ABORT"							: "Aborting..."}
 
 class UavStatus:
@@ -84,10 +98,12 @@ class UavStatus:
 		self.__mode = 'UNKNOWN'
 		self.__target_mode = 'UNKNOWN'
 		self.__timestamp = '[]'
+		self.__system_time_unix_sec = 0
 		self.__batt_volt_V = 0.0
 		self.__batt_percentage = 0
 		self.__rec_channel_pwm = 0
 		self.__shutdown_channel_pwm = 0
+		self.__gps_fix_type_3d_fix = False
 		self.__sys_shutdown_requested = False
 		self.__start_recording = False
 		self.__rc_receiver_connected = False
@@ -288,7 +304,7 @@ class UavStatus:
 	def __get_uav_status__(self):
 		while True:
 			# Get a MAVLINK message
-			msg = self.__vehicle.recv_match(type=['HEARTBEAT','RC_CHANNELS','SYS_STATUS','BATTERY_STATUS'], blocking=True)
+			msg = self.__vehicle.recv_match(type=['HEARTBEAT','RC_CHANNELS','SYS_STATUS','BATTERY_STATUS','SYSTEM_TIME','GPS_RAW_INT'], blocking=True)
 			msg_type = msg.get_type()
 
 			if msg_type == 'HEARTBEAT':
@@ -394,6 +410,34 @@ class UavStatus:
 				# Get the battery percentage from the BATTERY_STATUS message
 				if self.__threadLock.acquire():
 					self.__batt_percentage = msg.battery_remaining
+					self.__threadLock.release()
+			elif msg_type == 'SYSTEM_TIME':
+				# Update the system timestamp
+				if self.__threadLock.acquire():
+					if self.__gps_fix_type_3d_fix:
+						try:
+							sys_time_unix_usec = int(msg.time_unix_usec)
+							if sys_time_unix_usec > 0:
+								self.__system_time_unix_sec = int(sys_time_unix_usec / 1000000.0)
+								self.__timestamp = datetime.fromtimestamp(self.__system_time_unix_sec).time()
+						except (AttributeError, ValueError):
+							pass
+					self.__threadLock.release()
+			elif msg_type == 'GPS_RAW_INT':
+				# Update the GPS status variables
+				if self.__threadLock.acquire():
+					with open(self.__log_file, 'a') as log:
+						try:
+							fix_type = int(msg.fix_type)
+							if fix_type > gps_fix_type.GPS_FIX_TYPE_2D_FIX.value and self.__gps_fix_type_3d_fix == False:
+								self.__gps_fix_type_3d_fix = True
+								print(f"{self.__timestamp} {log_messages['MSG_GPS_3D_FIX_OBTAINED']}", file=log)
+							elif fix_type <= gps_fix_type.GPS_FIX_TYPE_2D_FIX.value and self.__gps_fix_type_3d_fix:
+								self.__gps_fix_type_3d_fix = False
+								print(f"{self.__timestamp} {log_messages['MSG_GPS_3D_FIX_LOST']}", file=log)
+						except (AttributeError, ValueError):
+							pass
+
 					self.__threadLock.release()
 	
 	# Update the UAV status by writing the status variables to file
@@ -508,7 +552,7 @@ class UavStatus:
 								elif cmd == api_commands["CMD_GET_FLIGHT_MODE"]:
 									reply = self.__mode
 								elif cmd == api_commands["CMD_GET_SYSTEM_TIME"]:
-									reply = '0'
+									reply = str(self.__system_time_unix_sec)
 								else:
 									reply = api_responses["CMD_UNRECOGNIZED"]
 						
